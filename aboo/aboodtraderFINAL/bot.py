@@ -1968,6 +1968,16 @@ def bot_worker(req: BotReq, S: dict, stop: threading.Event):
                         if _now - S.get("_last_no_trade_signal_ts", 0) >= 20:
                             log.info("⏸️ شموع كافية — لا إشارة دخول (WAIT) حسب الاستراتيجية في أي زوج")
                             S["_last_no_trade_signal_ts"] = _now
+            elif (not QX) and S["logged_in"]:
+                # وضع المحاكاة بدون pyquotex:
+                # نولّد إشارة بسيطة حتى يعمل البوت فعلياً على السيرفر.
+                direction = random.choice(["call", "put"])
+                chosen_asset = all_assets[0]
+                any_candles = True
+                S["candles_ok"] = True
+                S["candle_source"] = "محاكاة محلية"
+                S["status_msg"] = ""
+                log.info("🧪 SIM signal: %s -> %s", chosen_asset, direction.upper())
             else:
                 log.warning("⚠️ لا اتصال — تخطّ")
                 stop.wait(timeout=1.0)
