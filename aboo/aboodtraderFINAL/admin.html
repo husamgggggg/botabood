@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>abood trader | لوحة الإدارة</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap');
+:root{--bg:#0b0d12;--sf:#13161e;--card:#1a1e28;--br:#252b38;
+  --g:#00e676;--r:#ff1744;--or:#ff9800;--bl:#2979ff;--tx:#eaf0f8;--mu:#5e6d82;}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:'Roboto',sans-serif;font-size:16px;background:var(--bg);color:var(--tx);min-height:100vh;}
+.app{max-width:900px;margin:0 auto;padding:20px;}
+h1{font-size:22px;font-weight:900;color:var(--g);margin-bottom:20px;display:flex;align-items:center;gap:10px;}
+.badge{font-size:11px;background:rgba(0,230,118,.1);border:1px solid rgba(0,230,118,.3);
+  color:var(--g);padding:3px 10px;border-radius:20px;}
+
+/* LOGIN */
+#loginBox{background:var(--sf);border:1px solid var(--br);border-radius:16px;
+  padding:28px;max-width:380px;margin:60px auto;}
+#loginBox h2{font-size:18px;font-weight:700;text-align:center;margin-bottom:20px;}
+.fg{margin-bottom:14px;}
+.fg label{font-size:12px;color:var(--mu);display:block;margin-bottom:6px;}
+.fg input{width:100%;background:var(--card);border:1.5px solid var(--br);border-radius:10px;
+  padding:12px 14px;color:var(--tx);font-family:'Roboto',sans-serif;font-size:14px;outline:none;direction:ltr;}
+.fg input:focus{border-color:var(--g);}
+.btn{background:linear-gradient(135deg,#4db7ff,#2979ff);color:#fff;border:none;border-radius:10px;padding:13px 20px;
+  font-size:14px;font-weight:700;font-family:'Roboto',sans-serif;cursor:pointer;transition:all .2s;}
+.btn:hover{filter:brightness(1.1);}
+.btn.full{width:100%;}
+.btn.red{background:var(--r);color:#fff;}
+.btn.blue{background:var(--bl);color:#fff;}
+.btn.small{padding:7px 14px;font-size:12px;}
+
+/* STATS */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;}
+.stat{background:var(--sf);border:1px solid var(--br);border-radius:12px;padding:16px;text-align:center;}
+.stat .n{font-size:24px;font-weight:900;margin-bottom:4px;}
+.stat .l{font-size:11px;color:var(--mu);}
+.n.g{color:var(--g);}
+.n.r{color:var(--r);}
+.n.or{color:var(--or);}
+
+/* TABLE */
+.tbl-wrap{background:var(--sf);border:1px solid var(--br);border-radius:14px;overflow:hidden;}
+.tbl-head{padding:14px 16px;border-bottom:1px solid var(--br);display:flex;
+  align-items:center;justify-content:space-between;}
+.tbl-head h3{font-size:15px;font-weight:700;}
+table{width:100%;border-collapse:collapse;}
+th{padding:10px 14px;font-size:11px;color:var(--mu);text-align:right;
+  border-bottom:1px solid var(--br);font-weight:600;}
+td{padding:12px 14px;font-size:13px;border-bottom:1px solid rgba(37,43,56,.5);}
+tr:last-child td{border-bottom:none;}
+tr:hover td{background:rgba(255,255,255,.02);}
+
+/* STATUS BADGES */
+.s-badge{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;
+  border-radius:20px;font-size:11px;font-weight:700;}
+.s-pending{background:rgba(255,152,0,.12);color:var(--or);border:1px solid rgba(255,152,0,.3);}
+.s-approved{background:rgba(0,230,118,.1);color:var(--g);border:1px solid rgba(0,230,118,.25);}
+.s-rejected{background:rgba(255,23,68,.1);color:var(--r);border:1px solid rgba(255,23,68,.25);}
+.online-dot{width:7px;height:7px;border-radius:50%;background:var(--g);animation:pulse 1.5s infinite;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* MODAL */
+.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:100;
+  justify-content:center;align-items:center;}
+.modal.show{display:flex;}
+.modal-box{background:var(--sf);border:1px solid var(--br);border-radius:16px;
+  padding:24px;width:90%;max-width:420px;}
+.modal-box h3{font-size:16px;font-weight:700;margin-bottom:16px;}
+.btn-row{display:flex;gap:10px;margin-top:16px;}
+
+/* TOAST */
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(10px);
+  background:var(--card);border:1px solid var(--br);border-radius:10px;padding:10px 18px;
+  font-size:13px;font-weight:700;opacity:0;transition:all .3s;z-index:200;white-space:nowrap;}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+.toast.ok{border-color:var(--g);color:var(--g);}
+.toast.er{border-color:var(--r);color:var(--r);}
+
+@media(max-width:600px){
+  .stats{grid-template-columns:1fr 1fr;}
+  table{font-size:11px;}
+  th,td{padding:8px 10px;}
+}
+</style>
+
+<style>
+:root{
+  --bg:#07111f;
+  --sf:#101c2f;
+  --card:#152238;
+  --br:#22314d;
+  --g:#22c58b;
+  --r:#ef5b6c;
+  --or:#f0b44c;
+  --bl:#4db7ff;
+  --tx:#f4f7fb;
+  --mu:#8ea0ba;
+  --shadow:0 16px 36px rgba(3,10,24,.34);
+}
+body{background:linear-gradient(180deg,#07111f 0%,#0b1524 100%);color:var(--tx);}
+.app{max-width:1120px;padding:28px 20px 36px;}
+h1{font-size:26px;color:var(--tx);margin-bottom:22px;}
+.badge{background:rgba(77,183,255,.1);border-color:rgba(77,183,255,.22);color:var(--bl);padding:5px 12px;}
+#loginBox,.tbl-wrap,.stat,.modal-box,.toast{box-shadow:var(--shadow);}
+#loginBox,.tbl-wrap,.stat,.modal-box{background:linear-gradient(180deg,rgba(16,28,47,.98),rgba(13,24,40,.98));border-color:rgba(142,160,186,.12);}
+#loginBox{border-radius:22px;padding:32px;max-width:420px;}
+#loginBox h2{font-size:20px;margin-bottom:22px;}
+.fg label{color:var(--mu);font-weight:700;}
+.fg input{background:rgba(7,17,31,.8);border-color:rgba(142,160,186,.14);border-radius:14px;min-height:48px;}
+.fg input:focus{border-color:rgba(77,183,255,.5);box-shadow:0 0 0 4px rgba(77,183,255,.08);}
+.btn{border-radius:14px;min-height:44px;background:linear-gradient(135deg,#25c68e,#139f72);box-shadow:0 10px 24px rgba(20,157,109,.22);}
+.btn.red{background:linear-gradient(135deg,#ef5b6c,#cb4459);}
+.btn.blue{background:linear-gradient(135deg,#4db7ff,#358ee6);}
+.btn.small{min-height:36px;padding:8px 14px;}
+.btn:hover{filter:none;transform:translateY(-1px);}
+.stats{gap:14px;margin-bottom:22px;}
+.stat{border-radius:18px;padding:18px;}
+.stat .n{font-size:28px;}.stat .l{color:var(--mu);font-size:12px;}
+.tbl-wrap{border-radius:18px;overflow:hidden;}
+.tbl-head{padding:16px 18px;border-bottom-color:rgba(142,160,186,.12);}
+.tbl-head h3{font-size:16px;}
+th{color:var(--mu);font-size:12px;padding:12px 14px;border-bottom-color:rgba(142,160,186,.1);}
+td{padding:14px;border-bottom-color:rgba(34,49,77,.7);}
+tr:hover td{background:rgba(255,255,255,.02);}
+.s-badge{padding:5px 10px;border-radius:999px;font-size:11px;}
+.online-dot{box-shadow:0 0 10px rgba(34,197,139,.35);}
+.modal{background:rgba(7,17,31,.8);backdrop-filter:blur(10px);}
+.modal-box{border-radius:20px;padding:26px;}
+.modal-box h3{font-size:18px;margin-bottom:18px;}
+.btn-row{gap:12px;}
+.toast{background:rgba(16,28,47,.97);border-radius:14px;padding:12px 18px;}
+@media(max-width:700px){.stats{grid-template-columns:1fr 1fr;}h1{font-size:23px;}}
+</style>
+
+</head>
+<body>
+<div class="app">
+
+<!-- LOGIN -->
+<div id="loginBox">
+  <h2>لوحة الإدارة</h2>
+  <div class="fg">
+    <label>كلمة المرور</label>
+    <input type="password" id="adminPw" placeholder="••••••••">
+  </div>
+  <button class="btn full" onclick="adminLogin()">دخول</button>
+</div>
+
+<!-- DASHBOARD -->
+<div id="dashboard" style="display:none">
+  <h1>abood trader <span class="badge">لوحة الإدارة</span></h1>
+
+  <!-- Stats -->
+  <div class="stats">
+    <div class="stat"><div class="n or" id="sPending">0</div><div class="l">طلبات معلقة</div></div>
+    <div class="stat"><div class="n g" id="sApproved">0</div><div class="l">مفعّلون</div></div>
+    <div class="stat"><div class="n" id="sOnline">0</div><div class="l">متصلون الآن</div></div>
+    <div class="stat"><div class="n r" id="sRejected">0</div><div class="l">مرفوضون</div></div>
+  </div>
+
+  <!-- Users Table -->
+  <div class="tbl-wrap">
+    <div class="tbl-head">
+      <h3>المشتركون</h3>
+      <button class="btn small" onclick="loadUsers()">🔄 تحديث</button>
+    </div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>البريد الإلكتروني</th>
+            <th>الاسم</th>
+            <th>الحالة</th>
+            <th>متصل</th>
+            <th>البوت</th>
+            <th>ربح الجلسة</th>
+            <th>تاريخ الطلب</th>
+            <th>إجراء</th>
+          </tr>
+        </thead>
+        <tbody id="usersTable">
+          <tr><td colspan="8" style="text-align:center;color:var(--mu);padding:30px">جارٍ التحميل...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Modal -->
+<div class="modal" id="modal">
+  <div class="modal-box">
+    <h3 id="modalTitle">إجراء</h3>
+    <div class="fg">
+      <label>ملاحظة (اختياري)</label>
+      <input type="text" id="modalNote" placeholder="سبب القبول أو الرفض...">
+    </div>
+    <div class="btn-row">
+      <button class="btn" id="modalConfirm">تأكيد</button>
+      <button class="btn red small" onclick="closeModal()">إلغاء</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let AT = ''; // admin token
+let pendingAction = null;
+let _adminPollId = null;
+
+function _startAdminPoll(){
+  if(_adminPollId != null) clearInterval(_adminPollId);
+  _adminPollId = setInterval(loadUsers, 5000);
+}
+
+async function api(path, method='GET', body=null){
+  try{
+    const r = await fetch('/api'+path, {
+      method, headers:{'Content-Type':'application/json'},
+      body: body?JSON.stringify(body):null
+    });
+    return await r.json();
+  } catch { return null; }
+}
+
+async function adminLogin(){
+  const pw = document.getElementById('adminPw').value;
+  const d = await api('/admin/login','POST',{password:pw});
+  if(!d||!d.success) return toast('كلمة مرور خاطئة','er');
+  AT = d.token;
+  try{ localStorage.setItem('husaam_admin_t', AT); } catch(e){}
+  document.getElementById('loginBox').style.display='none';
+  document.getElementById('dashboard').style.display='block';
+  loadUsers();
+  _startAdminPoll();
+}
+
+async function loadUsers(){
+  if(!AT) return;
+  let r;
+  try{
+    r = await fetch('/api/admin/users?admin_token='+encodeURIComponent(AT));
+  } catch { return; }
+  if(r.status === 403){
+    if(_adminPollId != null){ clearInterval(_adminPollId); _adminPollId = null; }
+    try{ localStorage.removeItem('husaam_admin_t'); } catch(e){}
+    if(document.getElementById('dashboard').style.display === 'block'){
+      toast('جلسة الأدمن غير صالحة — أعد تسجيل الدخول','er');
+      document.getElementById('dashboard').style.display = 'none';
+      document.getElementById('loginBox').style.display = 'block';
+      AT = '';
+    }
+    return;
+  }
+  const d = await r.json();
+  if(!d || !Array.isArray(d.users)) return;
+
+  const users = d.users;
+  let pending=0, approved=0, online=0, rejected=0;
+  users.forEach(u=>{
+    if(u.status==='pending') pending++;
+    else if(u.status==='approved') approved++;
+    else if(u.status==='rejected') rejected++;
+    if(u.online) online++;
+  });
+  document.getElementById('sPending').textContent = pending;
+  document.getElementById('sApproved').textContent = approved;
+  document.getElementById('sOnline').textContent = online;
+  document.getElementById('sRejected').textContent = rejected;
+
+  const tb = document.getElementById('usersTable');
+  if(!users.length){
+    tb.innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--mu);padding:30px">لا يوجد مشتركون بعد</td></tr>';
+    return;
+  }
+
+  tb.innerHTML = users.map(u => `
+    <tr>
+      <td>${u.email}</td>
+      <td>${u.name||'—'}</td>
+      <td>${statusBadge(u.status)}</td>
+      <td>${u.online?'<span class="online-dot"></span>':'—'}</td>
+      <td>${u.running?'<span style="color:var(--g);font-weight:700">يعمل ▶</span>':'<span style="color:var(--mu)">متوقف</span>'}</td>
+      <td style="color:${u.session_profit>=0?'var(--g)':'var(--r)'};font-weight:700">
+        ${u.session_profit>=0?'+':''}${u.session_profit||0}
+      </td>
+      <td style="font-size:11px;color:var(--mu)">${formatDate(u.registered_at)}</td>
+      <td>${actionBtns(u)}</td>
+    </tr>
+  `).join('');
+}
+
+function statusBadge(s){
+  if(s==='pending') return '<span class="s-badge s-pending">معلق</span>';
+  if(s==='approved') return '<span class="s-badge s-approved">مقبول</span>';
+  if(s==='rejected') return '<span class="s-badge s-rejected">مرفوض</span>';
+  return s;
+}
+
+function actionBtns(u){
+  let btns = '';
+  if(u.status==='pending'){
+    btns += `<button class="btn small" onclick="doAction('${u.email}','approve')" style="margin-left:6px">قبول</button>`;
+    btns += `<button class="btn small red" onclick="doAction('${u.email}','reject')" style="margin-left:6px">رفض</button>`;
+    btns += `<button class="btn small" style="margin-left:6px;background:#2b3444;color:#ef5b6c" onclick="deleteUser('${u.email}')">حذف</button>`;
+  } else if(u.status==='approved'){
+    if(u.running)
+      btns += `<button class="btn small red" onclick="stopUser('${u.email}')" style="margin-left:6px">إيقاف</button>`;
+    btns += `<button class="btn small red" onclick="doAction('${u.email}','reject')" style="margin-left:6px">إلغاء</button>`;
+    btns += `<button class="btn small" style="margin-left:6px;background:#2b3444;color:#ef5b6c" onclick="deleteUser('${u.email}')">حذف</button>`;
+  } else if(u.status==='rejected'){
+    btns += `<button class="btn small blue" onclick="doAction('${u.email}','approve')" style="margin-left:6px">إعادة قبول</button>`;
+    btns += `<button class="btn small" style="margin-left:6px;background:#2b3444;color:#ef5b6c" onclick="deleteUser('${u.email}')">حذف</button>`;
+  }
+  return btns || '—';
+}
+
+function doAction(email, action){
+  pendingAction = {email, action};
+  document.getElementById('modalTitle').textContent =
+    action==='approve' ? `قبول: ${email}` : `رفض: ${email}`;
+  document.getElementById('modalNote').value = '';
+  document.getElementById('modalConfirm').onclick = confirmAction;
+  document.getElementById('modal').classList.add('show');
+}
+
+async function confirmAction(){
+  if(!pendingAction) return;
+  const note = document.getElementById('modalNote').value;
+  const d = await api('/admin/approve','POST',{
+    admin_token: AT,
+    email: pendingAction.email,
+    action: pendingAction.action,
+    note
+  });
+  closeModal();
+  if(d&&d.success){
+    toast(d.message,'ok');
+    if(pendingAction.action==='approve' && d.token){
+      // نسخ الـ token للإدارة
+      navigator.clipboard?.writeText(d.token).catch(()=>{});
+      toast(`Token: ${d.token.substring(0,12)}... (تم نسخه)`,'ok');
+    }
+    loadUsers();
+  } else {
+    toast('فشل الإجراء','er');
+  }
+  pendingAction = null;
+}
+
+async function deleteUser(email){
+  if(!confirm('هل أنت متأكد من حذف ' + email + ' نهائياً؟')) return;
+  const r = await fetch('/api/admin/delete_user', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({admin_token: AT, email, action:'delete'})
+  });
+  const d = await r.json();
+  if(d.success){ toast('تم الحذف','ok'); loadUsers(); }
+  else toast((d.detail || d.message || 'فشل'),'er');
+}
+async function stopUser(email){
+  const d = await api('/admin/stop_user','POST',{admin_token:AT, email, action:'stop'});
+  if(d&&d.success){ toast('تم إيقاف البوت','ok'); loadUsers(); }
+}
+
+
+function closeModal(){
+  document.getElementById('modal').classList.remove('show');
+  pendingAction = null;
+}
+
+function formatDate(iso){
+  if(!iso) return '—';
+  try{ return new Date(iso).toLocaleDateString('ar',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); }
+  catch{ return iso.substring(0,10); }
+}
+
+let tT;
+function toast(msg,type){
+  const el=document.getElementById('toast');
+  el.textContent=msg; el.className='toast show '+(type||'');
+  clearTimeout(tT); tT=setTimeout(()=>el.classList.remove('show'),3000);
+}
+
+// Enter key for login
+document.getElementById('adminPw').addEventListener('keydown', e=>{
+  if(e.key==='Enter') adminLogin();
+});
+
+(function restoreAdminSession(){
+  try{ AT = localStorage.getItem('husaam_admin_t') || ''; } catch(e){ AT = ''; }
+  if(!AT) return;
+  document.getElementById('loginBox').style.display = 'none';
+  document.getElementById('dashboard').style.display = 'block';
+  loadUsers();
+  _startAdminPoll();
+})();
+</script>
+</body>
+</html>
