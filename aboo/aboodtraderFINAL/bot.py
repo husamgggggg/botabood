@@ -24,6 +24,11 @@ try:
 except ImportError:
     QX = False
 
+# يسمح بإجبار وضع المحاكاة حتى لو pyquotex مثبت (مفيد عند حظر Cloudflare 403)
+FORCE_SIM_MODE = os.getenv("FORCE_SIM_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
+if FORCE_SIM_MODE:
+    QX = False
+
 # تشخيص آخر جلب شموع / WebSocket (للوج)
 _HUSAAM_WS_LAST: dict = {}
 
@@ -2556,5 +2561,7 @@ if __name__ == "__main__":
     log.info("🚀 abood trader — http://localhost:8000")
     log.info(f"👤 Admin: http://localhost:8000/admin | Password: {ADMIN_PW}")
     log.info(f"📦 pyquotex: {'✅' if QX else '❌ محاكاة'}")
+    if FORCE_SIM_MODE:
+        log.info("🧪 FORCE_SIM_MODE=ON (تم تعطيل اتصال Quotex الحقيقي)")
     log.info(f"📦 pydantic : v{pydantic.VERSION}")
     uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)
