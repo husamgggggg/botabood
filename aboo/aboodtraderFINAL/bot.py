@@ -224,13 +224,14 @@ def make_pin_input(email, S):
 SESSIONS: dict = {}
 
 def new_session(email=""):
+    sim_demo_balance = 10_000.0 if not QX else 0.0
     return {
         "logged_in":      False,
         "needs_pin":      False,
         "email":          email,
         "currency":       "USD",
         "real_balance":   0.0,
-        "demo_balance":   0.0,
+        "demo_balance":   sim_demo_balance,
         "start_balance":  0.0,
         "running":        False,
         "current_trade":  None,
