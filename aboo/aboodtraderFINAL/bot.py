@@ -1140,7 +1140,7 @@ _sim_market_state: dict = {}
 # احتفاظ أطول لبناء شموع 5ث (35 شمعة ≈ 175ث جدارياً على الأقل)
 _PRICE_BUFFER_RETENTION_SEC = 1800
 # تدفئة: تيكات للمراقبة/الواجهة فقط — لـ EMA10 لا تُستخدم في الإشارة
-_WARMUP_COLLECT_SEC = 20
+_WARMUP_COLLECT_SEC = 5
 _WARMUP_COLLECT_SEC_EMA10 = 25
 _SIM_PAYOUT = 0.82
 
@@ -2094,7 +2094,7 @@ def bot_worker(req: BotReq, S: dict, stop: threading.Event):
 
             # ── توقيت الإرسال
             # في وضع المضاعفة بعد الخسارة: تنفيذ فوري (بدون انتظار الدقيقة)
-            if not forced_double:
+            if not forced_double and QX:
                 wait_for_minute_start(stop)
                 if stop.is_set(): break
             else:
