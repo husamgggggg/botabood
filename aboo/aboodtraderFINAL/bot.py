@@ -1762,6 +1762,30 @@ async def _login_qx(email, password, S):
         return {"ok":False,"pin":False,"msg":str(e)}
 
 
+async def _pw_fill_first(page, selectors, value: str, timeout_ms: int = 6000) -> bool:
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() > 0:
+                await loc.fill(value, timeout=timeout_ms)
+                return True
+        except Exception:
+            pass
+    return False
+
+
+async def _pw_click_first(page, selectors, timeout_ms: int = 6000) -> bool:
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() > 0:
+                await loc.click(timeout=timeout_ms)
+                return True
+        except Exception:
+            pass
+    return False
+
+
 async def _login_qx_browser(email: str, password: str):
     """
     المرحلة 1 (Browser-based):
@@ -1781,10 +1805,63 @@ async def _login_qx_browser(email: str, password: str):
             else:
                 context = await browser.new_context()
             page = await context.new_page()
-            await page.goto("https://qxbroker.com/en/sign-in", wait_until="domcontentloaded", timeout=90000)
-            await page.fill("input[type='email']", email, timeout=30000)
-            await page.fill("input[type='password']", password, timeout=30000)
-            await page.click("button[type='submit']", timeout=30000)
+            await page.goto("https://qxbroker.com/en/sign-in", wait_until="networkidle", timeout=90000)
+            await asyncio.sleep(1.5)
+
+            # إذا كانت الجلسة محفوظة ومفعّلة، قد يتم التحويل تلقائياً إلى صفحة التداول.
+            if "/trade" not in (page.url or ""):
+                email_ok = await _pw_fill_first(
+                    page,
+                    [
+                        "input[type='email']",
+                        "input[name='email']",
+                        "input[autocomplete='email']",
+                        "input[placeholder*='mail' i]",
+                        "input[id*='email' i]",
+                    ],
+                    email,
+                    timeout_ms=12000,
+                )
+                pass_ok = await _pw_fill_first(
+                    page,
+                    [
+                        "input[type='password']",
+                        "input[name='password']",
+                        "input[autocomplete='current-password']",
+                        "input[id*='pass' i]",
+                    ],
+                    password,
+                    timeout_ms=12000,
+                )
+                if not email_ok or not pass_ok:
+                    body = ""
+                    try:
+                        body = (await page.inner_text("body"))[:500]
+                    except Exception:
+                        pass
+                    return {
+                        "ok": False,
+                        "msg": "Browser login: تعذر العثور على حقول تسجيل الدخول (email/password). "
+                               f"url={page.url} body={body}",
+                    }
+
+                click_ok = await _pw_click_first(
+                    page,
+                    [
+                        "button[type='submit']",
+                        "button:has-text('Sign in')",
+                        "button:has-text('Log in')",
+                        "button:has-text('Login')",
+                        "button:has-text('تسجيل')",
+                    ],
+                    timeout_ms=12000,
+                )
+                if not click_ok:
+                    # fallback: Enter من حقل كلمة المرور
+                    try:
+                        await page.keyboard.press("Enter")
+                    except Exception:
+                        pass
             try:
                 await page.wait_for_url("**/trade/**", timeout=60000)
             except PwTimeoutError:
