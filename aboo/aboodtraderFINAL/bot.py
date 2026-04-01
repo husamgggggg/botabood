@@ -1131,11 +1131,13 @@ def _fallback_direction_from_candles(candles) -> tuple:
 # - HUSAAM_PRIVATE: نفس السحب لكن آخر 55 شمعة بعد التنظيف.
 # - التيكات / realtime: مراقبة وواجهة فقط.
 _price_buffers: dict = {}
+_sim_market_state: dict = {}
 # احتفاظ أطول لبناء شموع 5ث (35 شمعة ≈ 175ث جدارياً على الأقل)
 _PRICE_BUFFER_RETENTION_SEC = 1800
 # تدفئة: تيكات للمراقبة/الواجهة فقط — لـ EMA10 لا تُستخدم في الإشارة
-_WARMUP_COLLECT_SEC = 180
+_WARMUP_COLLECT_SEC = 20
 _WARMUP_COLLECT_SEC_EMA10 = 25
+_SIM_PAYOUT = 0.82
 
 
 def _quotex_tick_keys(client, asset: str):
@@ -1273,6 +1275,52 @@ def _build_candles(asset, candle_secs=5) -> list:
         candles.append({"open":buf[0],"high":max(buf),"low":min(buf),"close":buf[-1]})
     log.debug("📊 %s شمعة من %s سعر", len(candles), len(prices))
     return candles
+
+
+def _sim_init_asset(asset: str) -> None:
+    if asset in _sim_market_state:
+        return
+    base = 1.0 + ((abs(hash(asset)) % 9000) / 10000.0)
+    _sim_market_state[asset] = {
+        "price": base,
+        "drift": random.uniform(-0.00003, 0.00003),
+        "vol": random.uniform(0.00025, 0.0009),
+    }
+
+
+def _sim_next_price(asset: str, dt: float = 1.0) -> float:
+    _sim_init_asset(asset)
+    st = _sim_market_state[asset]
+    p = float(st["price"])
+    drift = float(st["drift"])
+    vol = float(st["vol"])
+    # Mean reversion خفيف + ضوضاء Gaussian لإعطاء سلوك سعر أقرب للواقع
+    noise = random.gauss(0.0, vol) * max(dt, 0.2)
+    mean_revert = (1.1 - p) * 0.00008
+    p = p * (1.0 + drift + mean_revert + noise)
+    p = max(0.2, min(5.0, p))
+    st["price"] = p
+    if random.random() < 0.03:
+        st["drift"] = max(-0.00012, min(0.00012, drift + random.uniform(-0.00002, 0.00002)))
+    return p
+
+
+def _sim_collect_price(asset: str, ticks: int = 1) -> float:
+    p = 0.0
+    for _ in range(max(1, int(ticks))):
+        p = _sim_next_price(asset, dt=1.0)
+        _append_price_tick(asset, p)
+    return p
+
+
+def _sim_latest_price(asset: str) -> float:
+    arr = _price_buffers.get(asset) or []
+    if arr:
+        try:
+            return float(arr[-1]["price"])
+        except Exception:
+            pass
+    return _sim_collect_price(asset, ticks=1)
 
 _husaam_api_candle_cache: dict = {}  # asset -> {t, candles, source: "quotex"}
 _husaam_ema10_analysis_log_ts: dict = {}  # asset -> وقت آخر log تفصيلي (تخفيف تكرار الكاش)
@@ -1782,6 +1830,9 @@ def bot_worker(req: BotReq, S: dict, stop: threading.Event):
         if QX and S["client"]:
             for a in all_assets:
                 _collect_price(S["client"], a, S["email"])
+        else:
+            for a in all_assets:
+                _sim_collect_price(a, ticks=1)
         stop.wait(timeout=1)
     if stop.is_set(): return
 
@@ -1969,15 +2020,55 @@ def bot_worker(req: BotReq, S: dict, stop: threading.Event):
                             log.info("⏸️ شموع كافية — لا إشارة دخول (WAIT) حسب الاستراتيجية في أي زوج")
                             S["_last_no_trade_signal_ts"] = _now
             elif (not QX) and S["logged_in"]:
-                # وضع المحاكاة بدون pyquotex:
-                # نولّد إشارة بسيطة حتى يعمل البوت فعلياً على السيرفر.
-                direction = random.choice(["call", "put"])
-                chosen_asset = all_assets[0]
-                any_candles = True
-                S["candles_ok"] = True
-                S["candle_source"] = "محاكاة محلية"
-                S["status_msg"] = ""
-                log.info("🧪 SIM signal: %s -> %s", chosen_asset, direction.upper())
+                # محاكاة احترافية: توليد تيكات + شموع 1m ثم تحليل بنفس الاستراتيجية.
+                for a in all_assets:
+                    _sim_collect_price(a, ticks=1)
+                _need_len = (
+                    _HUSAAM_PRIVATE_MIN_BARS
+                    if req.strategy == "HUSAAM_PRIVATE"
+                    else _HUSAAM_EMA10_ANALYSIS_BARS
+                )
+                best_score = 0
+                best_dir = "wait"
+                best_asset = None
+                max_len = 0
+                candles_by_asset = {}
+                for a in all_assets:
+                    cs = _build_candles(a, candle_secs=_HUSAAM_EMA10_CANDLE_SECS)
+                    candles_by_asset[a] = cs
+                    max_len = max(max_len, len(cs))
+                    if len(cs) < _need_len:
+                        continue
+                    any_candles = True
+                    d, score = analyze_score(cs, req.strategy)
+                    if d != "wait" and score >= best_score:
+                        best_score = score
+                        best_dir = d
+                        best_asset = a
+                S["candles_ok"] = any_candles
+                S["candle_source"] = "محاكاة داخلية (شموع 1m)"
+                if best_asset and best_dir != "wait":
+                    direction = best_dir
+                    chosen_asset = best_asset
+                    S["status_msg"] = ""
+                    log.info("🧪 SIM best: %s -> %s (score=%s)", chosen_asset, direction.upper(), best_score)
+                elif not any_candles:
+                    S["status_msg"] = f"⏳ تجهيز محاكاة الشموع: {max_len}/{_need_len}"
+                    stop.wait(timeout=1.0)
+                    continue
+                else:
+                    fb_dir = "wait"
+                    fb_asset = None
+                    fb_score = 0
+                    for a, cs in candles_by_asset.items():
+                        d2, s2 = _fallback_direction_from_candles(cs)
+                        if d2 != "wait" and s2 >= fb_score:
+                            fb_dir, fb_asset, fb_score = d2, a, s2
+                    if fb_asset:
+                        direction = fb_dir
+                        chosen_asset = fb_asset
+                        S["status_msg"] = "تم تفعيل دخول بديل (محاكاة)"
+                        log.info("🧪 SIM fallback: %s -> %s", chosen_asset, direction.upper())
             else:
                 log.warning("⚠️ لا اتصال — تخطّ")
                 stop.wait(timeout=1.0)
@@ -2040,6 +2131,7 @@ def bot_worker(req: BotReq, S: dict, stop: threading.Event):
                             break
                         continue
                 else:
+                    trade["entry_price"] = _sim_latest_price(chosen_asset)
                     log.info(f"🔵 محاكاة {chosen_asset} {direction.upper()} ({i+1}/{max(1, int(burst_count))})")
                 opened_trades.append((trade, tid))
 
@@ -2058,6 +2150,9 @@ def bot_worker(req: BotReq, S: dict, stop: threading.Event):
                 if QX and S["client"]:
                     for a in all_assets:
                         _collect_price(S["client"], a, S["email"])
+                else:
+                    for a in all_assets:
+                        _sim_collect_price(a, ticks=1)
                 stop.wait(timeout=1)
             if stop.is_set(): break
 
@@ -2070,8 +2165,20 @@ def bot_worker(req: BotReq, S: dict, stop: threading.Event):
                     win = r2["win"]
                     prf = r2["profit"] if win else -(r2.get("profit",0) or req.amount)
                 else:
-                    win = random.random() < 0.58
-                    prf = round(req.amount*0.80,2) if win else -req.amount
+                    ep = float(trade.get("entry_price", 0) or 0)
+                    xp = _sim_latest_price(trade.get("asset", chosen_asset))
+                    if ep <= 0:
+                        ep = xp
+                    diff = xp - ep
+                    if trade.get("direction") == "call":
+                        win = diff > 0
+                    else:
+                        win = diff < 0
+                    if abs(diff) < max(ep * 0.00008, 1e-8):
+                        win = False
+                    prf = round(req.amount * _SIM_PAYOUT, 2) if win else -req.amount
+                    trade["entry_price"] = round(ep, 6)
+                    trade["exit_price"] = round(xp, 6)
 
                 prf = round(prf,2)
                 total_prf += prf
