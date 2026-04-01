@@ -274,6 +274,19 @@ def get_session_by_email(email) -> dict:
             return S
     return None
 
+
+def _is_sim_mode_session(S: dict | None) -> bool:
+    # محاكاة فقط عندما لا يوجد pyquotex ولا browser-state فعّال.
+    if not S:
+        return not QX
+    if not QX:
+        return True
+    if BROWSER_QX_MODE and S.get("browser_state_file"):
+        return False
+    if S.get("client"):
+        return False
+    return True
+
 # ── Models ────────────────────────────────────────────────────────────────────
 class RegisterReq(BaseModel):
     email: str
@@ -2811,10 +2824,11 @@ async def login(req: LoginReq):
         S["real_balance"]=0.0; S["demo_balance"]=10_000.0; S["currency"]="USD"
     S["logged_in"]=True; S["needs_pin"]=False; S["email"]=req.email
     S["status_msg"] = ""
+    sim_mode = _is_sim_mode_session(S)
     return {"success":True,"needs_pin":False,"email":req.email,
             "user_id":abs(hash(req.email))%90_000_000+10_000_000,
             "real_balance":S["real_balance"],"demo_balance":S["demo_balance"],
-            "currency":S["currency"],"sim_mode":not QX}
+            "currency":S["currency"],"sim_mode":sim_mode}
 
 @app.post("/api/pin")
 async def pin_ep(req: PinReq):
@@ -2830,10 +2844,11 @@ async def pin_ep(req: PinReq):
     for _ in range(30):
         await asyncio.sleep(1)
         if S["logged_in"]:
+            sim_mode = _is_sim_mode_session(S)
             return {"success":True,"email":S["email"],
                     "user_id":abs(hash(S["email"]))%90_000_000+10_000_000,
                     "real_balance":S["real_balance"],"demo_balance":S["demo_balance"],
-                    "currency":S["currency"],"sim_mode":False}
+                    "currency":S["currency"],"sim_mode":sim_mode}
         if not S["needs_pin"] and not S["logged_in"]:
             raise HTTPException(401,"PIN خاطئ")
     raise HTTPException(408,"انتهت المهلة")
@@ -2896,14 +2911,16 @@ async def stop_ep(req: TokenReq):
 async def status(token: str=""):
     S = get_session(token)
     if not S:
+        sim_mode = _is_sim_mode_session(None)
         return {
             "logged_in": False,
             "running": False,
             "needs_pin": False,
-            "sim_mode": (not QX),
-            "status_msg": "وضع المحاكاة مفعل" if (not QX) else "",
+            "sim_mode": sim_mode,
+            "status_msg": "وضع المحاكاة مفعل" if sim_mode else "",
         }
     total = S["wins"]+S["losses"]
+    sim_mode = _is_sim_mode_session(S)
     return {
         "logged_in":      S["logged_in"],
         "needs_pin":      S["needs_pin"],
@@ -2920,7 +2937,7 @@ async def status(token: str=""):
         "start_balance":  S["start_balance"],
         "current_trade":  S["current_trade"],
         "trades":         S["trades"][:50],
-        "sim_mode":       not QX,
+        "sim_mode":       sim_mode,
         "last_signal":    S["last_signal"],
         "candles_ok":     S.get("candles_ok",False),
         "candle_source":  S.get("candle_source",""),
