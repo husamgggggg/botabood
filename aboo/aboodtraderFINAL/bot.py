@@ -2790,10 +2790,14 @@ async def login(req: LoginReq):
             try: run_async_for(req.email, _close(S["client"]),5)
             except: pass
         S["email"] = req.email
-        if BROWSER_QX_MODE:
-            r = run_async_for(req.email, _login_qx_browser(req.email, req.password), 180)
-        else:
-            r = run_async_for(req.email, _login_qx(req.email,req.password,S), 150)
+        try:
+            if BROWSER_QX_MODE:
+                # تجنب 504 من الـ reverse proxy: نعيد رد واضح خلال أقل من دقيقة.
+                r = run_async_for(req.email, _login_qx_browser(req.email, req.password), 50)
+            else:
+                r = run_async_for(req.email, _login_qx(req.email,req.password,S), 150)
+        except TimeoutError:
+            raise HTTPException(408, "انتهت مهلة تسجيل الدخول. حاول مرة أخرى")
         if r.get("pin"):
             S["needs_pin"]=True
             return {"success":False,"needs_pin":True,"message":r["msg"]}

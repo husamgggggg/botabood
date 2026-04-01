@@ -702,7 +702,26 @@ function renderPairOption(asset){
   const [b,q]=pairFlags(asset);
   return `<div class="oi-row"><div class="oi-main"><span class="oi-check">✓</span></div><div class="oi-main"><span class="oi-name">${pairLabel(asset)}</span><img class="oi-flag" src="https://flagcdn.com/w20/${b}.png" alt="${b}"><img class="oi-flag" src="https://flagcdn.com/w20/${q}.png" alt="${q}"></div></div>`;
 }
-async function api(path,method='GET',body=null){try{const r=await fetch('/api'+path,{method,headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):null});return await r.json();}catch{return null;}}
+async function api(path,method='GET',body=null){
+  try{
+    const r=await fetch('/api'+path,{method,headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):null});
+    const ct=(r.headers.get('content-type')||'').toLowerCase();
+    let d=null;
+    if(ct.includes('application/json')) d=await r.json();
+    else{
+      const t=await r.text();
+      d={success:false,detail:(t||'استجابة غير صالحة من الخادم').slice(0,240)};
+    }
+    if(!r.ok){
+      if(!d||typeof d!=='object') d={success:false};
+      d.success=false;
+      d.detail=d.detail||d.message||`HTTP ${r.status}`;
+    }
+    return d;
+  }catch{
+    return {success:false,detail:'تعذر الاتصال بالخادم'};
+  }
+}
 async function checkConn(){
   const d=await api('/status?token='+s.token);
   if(d && typeof d.sim_mode==='boolean') s.sim=!!d.sim_mode;
@@ -738,20 +757,18 @@ async function doLogin(){
   const email=document.getElementById('iEm').value.trim(),pw=document.getElementById('iPw').value.trim();
   if(!email||!email.includes('@'))return toast('بريد غير صحيح','er');if(pw.length<4)return toast('كلمة مرور قصيرة','er');
   const btn=document.getElementById('lBtn');btn.disabled=true;btn.textContent='⏳ جارٍ الاتصال...';
-  let d=null;if(!s.sim)d=await api('/login','POST',{email,password:pw,token:s.token});
-  if(!d)d={success:true,email,user_id:Math.floor(10000000+Math.random()*89999999),real_balance:0,demo_balance:10000,currency:'USD',sim_mode:true};
+  const d=await api('/login','POST',{email,password:pw,token:s.token});
   btn.disabled=false;btn.textContent='تسجيل الدخول';
+  if(!d||d.success===false)return toast(d?.detail||d?.message||'فشل تسجيل الدخول','er');
   if(d.needs_pin){document.getElementById('loginBox').style.display='none';document.getElementById('pinBox').style.display='block';document.getElementById('pinEmail').textContent=email;return toast('تحقق من بريدك الإلكتروني','wa');}
-  if(!d.success)return toast(d.detail||d.message||'فشل','er');
   afterLogin(d);
 }
 async function doPin(){
   const pin=document.getElementById('iPin').value.trim();if(!pin||pin.length<4)return toast('أدخل PIN كامل','er');
   const btn=document.getElementById('pinBtn');btn.disabled=true;btn.textContent='⏳ جارٍ التحقق...';
-  let d=null;if(!s.sim)d=await api('/pin','POST',{pin,token:s.token});
-  if(!d)d={success:true,email:s.email,user_id:12345678,real_balance:0,demo_balance:10000,currency:'USD',sim_mode:true};
+  const d=await api('/pin','POST',{pin,token:s.token});
   btn.disabled=false;btn.textContent='تأكيد الرمز';
-  if(!d.success)return toast(d.detail||d.message||'PIN خاطئ','er');
+  if(!d||d.success===false)return toast(d?.detail||d?.message||'PIN خاطئ','er');
   afterLogin(d);
 }
 function backLogin(){document.getElementById('pinBox').style.display='none';document.getElementById('loginBox').style.display='block';}
@@ -764,7 +781,7 @@ function afterLogin(d){
   updBals();toast('✅ مرحباً بك في فريق عبود تريدر','ok');go('sBot',2);if(!s.sim)startPoll();
 }
 async function doLogout(){
-  doStop();clearInterval(s.pollInt);if(!s.sim)await api('/logout','POST',{token:s.token});
+  doStop();clearInterval(s.pollInt);if(s.token)await api('/logout','POST',{token:s.token});
   s.token='';s.email='';s.running=false;localStorage.removeItem('at_email');go('sReg',-1);toast('تم تسجيل الخروج','');
 }
 async function togBot(){s.running?doStop():doStart();}
