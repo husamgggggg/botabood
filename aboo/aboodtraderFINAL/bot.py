@@ -8,7 +8,7 @@ abood trader Bot — النسخة النهائية الكاملة
 ✅ متعدد المشتركين كل بحسابه المستقل
 ✅ إشعار عند تحقق الهدف
 """
-import asyncio, json, logging, os, queue, random
+import asyncio, json, logging, os, queue, random, re
 import secrets, threading, time, traceback
 from datetime import datetime, timezone
 
@@ -40,6 +40,7 @@ BROWSER_QX_MODE = os.getenv("BROWSER_QX_MODE", "0").strip().lower() in ("1", "tr
 
 # تشخيص آخر جلب شموع / WebSocket (للوج)
 _HUSAAM_WS_LAST: dict = {}
+_BROWSER_TICKETS: dict = {}
 
 
 def _ws_history_asset_matches(api, msg_asset, current_asset) -> bool:
@@ -249,6 +250,7 @@ def new_session(email=""):
         "losses":         0,
         "session_profit": 0.0,
         "client":         None,
+        "browser_state_file": "",
         "stop_event":     threading.Event(),
         "sim_mode":       not QX,
         "last_signal":    "",
@@ -1793,7 +1795,14 @@ async def _login_qx_browser(email: str, password: str):
                     pass
                 return {"ok": False, "msg": f"Browser login لم يكتمل. {txt}"}
             await context.storage_state(path=state_file)
-            return {"ok": True, "cur": "USD", "real": 0.0, "demo": 10_000.0}
+            bal = await _browser_fetch_balances(state_file)
+            return {
+                "ok": True,
+                "cur": "USD",
+                "real": bal.get("real", 0.0),
+                "demo": bal.get("demo", 10_000.0),
+                "state_file": state_file,
+            }
     except Exception as e:
         return {"ok": False, "msg": f"Browser login error: {e}"}
     finally:
@@ -1807,6 +1816,157 @@ async def _login_qx_browser(email: str, password: str):
                 await browser.close()
         except Exception:
             pass
+
+
+def _parse_num_text(s: str) -> float:
+    if not s:
+        return 0.0
+    t = s.replace(",", "").replace("USD", "").replace("$", "").strip()
+    m = re.search(r"-?\d+(?:\.\d+)?", t)
+    if not m:
+        return 0.0
+    try:
+        return float(m.group(0))
+    except Exception:
+        return 0.0
+
+
+async def _browser_fetch_balances(state_file: str) -> dict:
+    if not PLAYWRIGHT_OK:
+        return {"real": 0.0, "demo": 10_000.0}
+    browser = context = page = None
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+            context = await browser.new_context(storage_state=state_file)
+            page = await context.new_page()
+            await page.goto("https://qxbroker.com/en/trade", wait_until="domcontentloaded", timeout=90000)
+            await asyncio.sleep(2.0)
+            txt = await page.inner_text("body")
+            nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", txt or "")]
+            if not nums:
+                return {"real": 0.0, "demo": 10_000.0}
+            # عادة يظهر أول رقمين كأرصدة الحسابين.
+            n1 = nums[0] if len(nums) > 0 else 0.0
+            n2 = nums[1] if len(nums) > 1 else n1
+            real = min(n1, n2)
+            demo = max(n1, n2)
+            if demo <= 0:
+                demo = 10_000.0
+            return {"real": real, "demo": demo}
+    except Exception:
+        return {"real": 0.0, "demo": 10_000.0}
+    finally:
+        try:
+            if context:
+                await context.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                await browser.close()
+        except Exception:
+            pass
+
+
+async def _browser_trade_action(state_file: str, asset: str, amount: float, direction: str, acc: str) -> dict:
+    """
+    تنفيذ صفقة عبر متصفح حقيقي (مرحلة 2 مبسطة):
+    - يفتح trade page بجلسة محفوظة
+    - يضبط مبلغ الصفقة
+    - يضغط CALL/PUT
+    - يعيد snapshot للرصيد قبل الصفقة
+    """
+    if not PLAYWRIGHT_OK:
+        return {"ok": False, "msg": "Playwright غير متوفر"}
+    browser = context = page = None
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+            context = await browser.new_context(storage_state=state_file)
+            page = await context.new_page()
+            await page.goto("https://qxbroker.com/en/trade", wait_until="domcontentloaded", timeout=90000)
+            await asyncio.sleep(2.0)
+
+            # مبلغ الصفقة: محاولة على أول input رقمي ظاهر
+            inputs = page.locator("input")
+            cnt = await inputs.count()
+            for i in range(min(cnt, 12)):
+                el = inputs.nth(i)
+                try:
+                    typ = (await el.get_attribute("type")) or ""
+                    im = (await el.get_attribute("inputmode")) or ""
+                    if typ in ("number", "text") or im in ("numeric", "decimal"):
+                        await el.click(timeout=1000)
+                        await el.fill(str(float(amount)), timeout=1000)
+                        break
+                except Exception:
+                    pass
+
+            # نقرأ الرصيد التقريبي قبل الصفقة
+            body = await page.inner_text("body")
+            nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", body or "")]
+            bal_before = nums[0] if nums else 0.0
+
+            # زر الاتجاه
+            dir_tokens = ["call", "up", "buy", "شراء", "higher"] if direction == "call" else ["put", "down", "sell", "بيع", "lower"]
+            clicked = False
+            buttons = page.locator("button")
+            bcnt = await buttons.count()
+            for i in range(min(bcnt, 40)):
+                b = buttons.nth(i)
+                try:
+                    t = ((await b.inner_text(timeout=300)) or "").lower()
+                    if any(tok in t for tok in dir_tokens):
+                        await b.click(timeout=1000)
+                        clicked = True
+                        break
+                except Exception:
+                    pass
+            if not clicked:
+                return {"ok": False, "msg": "تعذر إيجاد زر CALL/PUT في الواجهة"}
+
+            tid = int(time.time() * 1000)
+            _BROWSER_TICKETS[tid] = {
+                "state_file": state_file,
+                "balance_before": bal_before,
+                "amount": float(amount),
+                "direction": direction,
+                "asset": asset,
+                "account_type": acc,
+                "created_at": time.time(),
+            }
+            return {"ok": True, "id": tid}
+    except Exception as e:
+        return {"ok": False, "msg": f"Browser trade error: {e}"}
+    finally:
+        try:
+            if context:
+                await context.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                await browser.close()
+        except Exception:
+            pass
+
+
+async def _browser_check_result(tid: int) -> dict:
+    meta = _BROWSER_TICKETS.get(tid)
+    if not meta:
+        return {"win": False, "profit": 0.0}
+    bal = await _browser_fetch_balances(meta["state_file"])
+    after = float(bal.get("demo", 0.0) if meta.get("account_type") != "real" else bal.get("real", 0.0))
+    before = float(meta.get("balance_before", 0.0))
+    amount = float(meta.get("amount", 0.0))
+    if before <= 0 or after <= 0:
+        # fallback محافظ إذا تعذر قراءة الرصيد
+        return {"win": False, "profit": -amount if amount > 0 else 0.0}
+    diff = round(after - before, 2)
+    if abs(diff) < 0.01:
+        return {"win": False, "profit": -amount if amount > 0 else 0.0}
+    return {"win": diff > 0, "profit": diff}
 
 
 def _should_fallback_to_sim(msg: str) -> bool:
@@ -1879,6 +2039,7 @@ def wait_for_minute_start(stop):
         time.sleep(min(0.5, left) if left > 0 else 0)
 
 def bot_worker(req: BotReq, S: dict, stop: threading.Event):
+    browser_live = bool(BROWSER_QX_MODE and S.get("browser_state_file"))
     # قائمة الأزواج — دعم متعدد الأزواج
     all_assets = list(req.assets) if req.assets else [req.asset]
     if req.asset and req.asset not in all_assets:
@@ -1952,6 +2113,14 @@ def bot_worker(req: BotReq, S: dict, stop: threading.Event):
         except Exception as e:
             log.error(f"خطأ رصيد البداية: {e}")
             start_bal = S["demo_balance"] if req.account_type=="demo" else S["real_balance"]
+    elif browser_live:
+        bal = run_async_for(S["email"], _browser_fetch_balances(S["browser_state_file"]), 40)
+        if req.account_type == "real":
+            start_bal = float(bal.get("real", S.get("real_balance", 0.0)) or 0.0)
+            S["real_balance"] = start_bal
+        else:
+            start_bal = float(bal.get("demo", S.get("demo_balance", 0.0)) or 0.0)
+            S["demo_balance"] = start_bal
     else:
         start_bal = S["demo_balance"] if req.account_type=="demo" else S["real_balance"]
     S["start_balance"] = start_bal
@@ -1965,10 +2134,12 @@ def bot_worker(req: BotReq, S: dict, stop: threading.Event):
     while not stop.is_set():
         try:
             # ── جمع الأسعار الحية ──────────────────────────────────────────
-            if QX and S["client"]: _collect_price(S["client"], req.asset, S["email"])
+            if QX and S["client"]:
+                _collect_price(S["client"], req.asset, S["email"])
 
             # جمع سعر إضافي
-            if QX and S["client"]: _collect_price(S["client"], req.asset, S["email"])
+            if QX and S["client"]:
+                _collect_price(S["client"], req.asset, S["email"])
 
             # ── تحليل الشمعات ─────────────────────────────────────────────
             direction = "wait"
@@ -2173,7 +2344,7 @@ def bot_worker(req: BotReq, S: dict, stop: threading.Event):
 
             # ── توقيت الإرسال
             # في وضع المضاعفة بعد الخسارة: تنفيذ فوري (بدون انتظار الدقيقة)
-            if not forced_double and QX:
+            if not forced_double and QX and not browser_live:
                 wait_for_minute_start(stop)
                 if stop.is_set(): break
             else:
@@ -2201,6 +2372,25 @@ def bot_worker(req: BotReq, S: dict, stop: threading.Event):
                 if QX and S["logged_in"] and S["client"]:
                     r = run_async_for(S["email"], _do_trade(S["client"],chosen_asset,req.amount,
                                             direction,req.account_type), 20)
+                    if r["ok"]:
+                        tid = r.get("id")
+                    else:
+                        msg = str(r.get("msg",""))
+                        log.warning(f"⚠️ {msg}")
+                        if "not_money" in msg.lower():
+                            log.warning("💸 رصيد غير كافٍ — توقف")
+                            S["current_trade"] = None
+                            stop.set()
+                            break
+                        continue
+                elif browser_live:
+                    r = run_async_for(
+                        S["email"],
+                        _browser_trade_action(
+                            S["browser_state_file"], chosen_asset, req.amount, direction, req.account_type
+                        ),
+                        60,
+                    )
                     if r["ok"]:
                         tid = r.get("id")
                     else:
@@ -2246,6 +2436,10 @@ def bot_worker(req: BotReq, S: dict, stop: threading.Event):
                     r2  = run_async_for(S["email"], _check_win(S["client"],tid), 15)
                     win = r2["win"]
                     prf = r2["profit"] if win else -(r2.get("profit",0) or req.amount)
+                elif browser_live and tid:
+                    r2 = run_async_for(S["email"], _browser_check_result(tid), 40)
+                    win = bool(r2.get("win"))
+                    prf = float(r2.get("profit", 0.0) or 0.0)
                 else:
                     ep = float(trade.get("entry_price", 0) or 0)
                     xp = _sim_latest_price(trade.get("asset", chosen_asset))
@@ -2306,6 +2500,18 @@ def bot_worker(req: BotReq, S: dict, stop: threading.Event):
                 else:
                     current_bal = prev_bal
                     log.warning("⚠️ لم يتم تحديث الرصيد")
+            elif browser_live:
+                bal = run_async_for(S["email"], _browser_fetch_balances(S["browser_state_file"]), 40)
+                if req.account_type == "real":
+                    current_bal = float(bal.get("real", S.get("real_balance", 0.0)) or 0.0)
+                    if current_bal > 0:
+                        S["real_balance"] = current_bal
+                else:
+                    current_bal = float(bal.get("demo", S.get("demo_balance", 0.0)) or 0.0)
+                    if current_bal > 0:
+                        S["demo_balance"] = current_bal
+                if current_bal <= 0:
+                    current_bal = S["demo_balance"] if req.account_type=="demo" else S["real_balance"]
             else:
                 # محاكاة
                 if req.account_type == "demo":
@@ -2520,7 +2726,9 @@ async def login(req: LoginReq):
                         "real_balance":S["real_balance"],"demo_balance":S["demo_balance"],
                         "currency":S["currency"],"sim_mode":True}
             raise HTTPException(401, msg)
-        S["client"]=r.get("client"); S["real_balance"]=r["real"]
+        S["client"]=r.get("client")
+        S["browser_state_file"] = r.get("state_file", "")
+        S["real_balance"]=r["real"]
         S["demo_balance"]=r["demo"]; S["currency"]=r.get("cur","USD")
     else:
         S["real_balance"]=0.0; S["demo_balance"]=10_000.0; S["currency"]="USD"
@@ -2562,7 +2770,8 @@ async def logout(req: TokenReq):
             try: run_async_for(S.get("email","_"), _close(S["client"]),5)
             except: pass
         S.update({"logged_in":False,"needs_pin":False,"trades":[],"wins":0,
-                  "losses":0,"session_profit":0.0,"current_trade":None,"client":None})
+                  "losses":0,"session_profit":0.0,"current_trade":None,"client":None,
+                  "browser_state_file": ""})
     return {"success":True}
 
 @app.post("/api/bot/start")
@@ -2570,8 +2779,8 @@ async def start(req: BotReq):
     S = get_session(req.token)
     if not S: raise HTTPException(403,"جلسة غير صالحة")
     if not S["logged_in"]: raise HTTPException(401,"سجّل الدخول أولاً")
-    if BROWSER_QX_MODE and not S.get("client"):
-        raise HTTPException(400, "Browser mode مرحلة 1: تسجيل الدخول فقط. التداول سيُفعّل في المرحلة 2.")
+    if BROWSER_QX_MODE and not S.get("client") and not S.get("browser_state_file"):
+        raise HTTPException(400, "Browser mode: لا يوجد state محفوظ. أعد تسجيل الدخول أولاً.")
     if S["running"]: raise HTTPException(400,"البوت يعمل بالفعل")
     # ── إعادة تعيين كاملة لكل جلسة جديدة ──────────────────────────────────
     # أوقف أي thread قديم أولاً
@@ -2648,6 +2857,6 @@ if __name__ == "__main__":
     if FORCE_SIM_MODE:
         log.info("🧪 FORCE_SIM_MODE=ON (تم تعطيل اتصال Quotex الحقيقي)")
     if BROWSER_QX_MODE:
-        log.info("🌐 BROWSER_QX_MODE=ON (تسجيل دخول Quotex عبر Playwright)")
+        log.info("🌐 BROWSER_QX_MODE=ON (تداول Quotex عبر Playwright - مرحلة 2)")
     log.info(f"📦 pydantic : v{pydantic.VERSION}")
     uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)
