@@ -2531,7 +2531,14 @@ async def stop_ep(req: TokenReq):
 @app.get("/api/status")
 async def status(token: str=""):
     S = get_session(token)
-    if not S: return {"logged_in":False,"running":False,"needs_pin":False}
+    if not S:
+        return {
+            "logged_in": False,
+            "running": False,
+            "needs_pin": False,
+            "sim_mode": (not QX),
+            "status_msg": "وضع المحاكاة مفعل" if (not QX) else "",
+        }
     total = S["wins"]+S["losses"]
     return {
         "logged_in":      S["logged_in"],
