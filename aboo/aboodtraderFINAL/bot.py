@@ -2028,28 +2028,26 @@ def bot_worker(req: BotReq, S: dict, stop: threading.Event):
                 # محاكاة احترافية: توليد تيكات + شموع 1m ثم تحليل بنفس الاستراتيجية.
                 for a in all_assets:
                     _sim_collect_price(a, ticks=1)
-                _need_len = (
-                    _HUSAAM_PRIVATE_MIN_BARS
-                    if req.strategy == "HUSAAM_PRIVATE"
-                    else _HUSAAM_EMA10_ANALYSIS_BARS
-                )
+                # في المحاكاة نستخدم شموع أسرع (5 ثوانٍ) لبدء التداول بسرعة مع الحفاظ على المنطق.
+                _need_len = 20
                 best_score = 0
                 best_dir = "wait"
                 best_asset = None
                 max_len = 0
                 candles_by_asset = {}
                 for a in all_assets:
-                    cs = _build_candles(a, candle_secs=_HUSAAM_EMA10_CANDLE_SECS)
+                    cs = _build_candles(a, candle_secs=5)
                     candles_by_asset[a] = cs
                     max_len = max(max_len, len(cs))
                     if len(cs) < _need_len:
                         continue
                     any_candles = True
-                    d, score = analyze_score(cs, req.strategy)
-                    if d != "wait" and score >= best_score:
-                        best_score = score
-                        best_dir = d
-                        best_asset = a
+                    if len(cs) >= 35:
+                        d, score = analyze_score(cs, req.strategy)
+                        if d != "wait" and score >= best_score:
+                            best_score = score
+                            best_dir = d
+                            best_asset = a
                 S["candles_ok"] = any_candles
                 S["candle_source"] = "محاكاة داخلية (شموع 1m)"
                 if best_asset and best_dir != "wait":
