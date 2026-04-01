@@ -24,10 +24,19 @@ try:
 except ImportError:
     QX = False
 
+try:
+    from playwright.async_api import async_playwright, TimeoutError as PwTimeoutError
+    PLAYWRIGHT_OK = True
+except ImportError:
+    PLAYWRIGHT_OK = False
+    async_playwright = None
+    PwTimeoutError = Exception
+
 # يسمح بإجبار وضع المحاكاة حتى لو pyquotex مثبت (مفيد عند حظر Cloudflare 403)
 FORCE_SIM_MODE = os.getenv("FORCE_SIM_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
 if FORCE_SIM_MODE:
     QX = False
+BROWSER_QX_MODE = os.getenv("BROWSER_QX_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
 
 # تشخيص آخر جلب شموع / WebSocket (للوج)
 _HUSAAM_WS_LAST: dict = {}
@@ -1751,6 +1760,55 @@ async def _login_qx(email, password, S):
         return {"ok":False,"pin":False,"msg":str(e)}
 
 
+async def _login_qx_browser(email: str, password: str):
+    """
+    المرحلة 1 (Browser-based):
+    - تسجيل دخول Quotex عبر متصفح حقيقي (Playwright)
+    - حفظ storage_state لكل مستخدم
+    """
+    if not PLAYWRIGHT_OK:
+        return {"ok": False, "msg": "Playwright غير مثبت على الخادم"}
+    os.makedirs(os.path.join("data", "browser_state"), exist_ok=True)
+    state_file = os.path.join("data", "browser_state", f"{email.replace('@', '_at_')}.json")
+    browser = context = page = None
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+            if os.path.exists(state_file):
+                context = await browser.new_context(storage_state=state_file)
+            else:
+                context = await browser.new_context()
+            page = await context.new_page()
+            await page.goto("https://qxbroker.com/en/sign-in", wait_until="domcontentloaded", timeout=90000)
+            await page.fill("input[type='email']", email, timeout=30000)
+            await page.fill("input[type='password']", password, timeout=30000)
+            await page.click("button[type='submit']", timeout=30000)
+            try:
+                await page.wait_for_url("**/trade/**", timeout=60000)
+            except PwTimeoutError:
+                txt = ""
+                try:
+                    txt = (await page.inner_text("body"))[:400]
+                except Exception:
+                    pass
+                return {"ok": False, "msg": f"Browser login لم يكتمل. {txt}"}
+            await context.storage_state(path=state_file)
+            return {"ok": True, "cur": "USD", "real": 0.0, "demo": 10_000.0}
+    except Exception as e:
+        return {"ok": False, "msg": f"Browser login error: {e}"}
+    finally:
+        try:
+            if context:
+                await context.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                await browser.close()
+        except Exception:
+            pass
+
+
 def _should_fallback_to_sim(msg: str) -> bool:
     m = (msg or "").lower()
     keys = [
@@ -2436,7 +2494,10 @@ async def login(req: LoginReq):
             try: run_async_for(req.email, _close(S["client"]),5)
             except: pass
         S["email"] = req.email
-        r = run_async_for(req.email, _login_qx(req.email,req.password,S), 150)
+        if BROWSER_QX_MODE:
+            r = run_async_for(req.email, _login_qx_browser(req.email, req.password), 180)
+        else:
+            r = run_async_for(req.email, _login_qx(req.email,req.password,S), 150)
         if r.get("pin"):
             S["needs_pin"]=True
             return {"success":False,"needs_pin":True,"message":r["msg"]}
@@ -2459,7 +2520,7 @@ async def login(req: LoginReq):
                         "real_balance":S["real_balance"],"demo_balance":S["demo_balance"],
                         "currency":S["currency"],"sim_mode":True}
             raise HTTPException(401, msg)
-        S["client"]=r["client"]; S["real_balance"]=r["real"]
+        S["client"]=r.get("client"); S["real_balance"]=r["real"]
         S["demo_balance"]=r["demo"]; S["currency"]=r.get("cur","USD")
     else:
         S["real_balance"]=0.0; S["demo_balance"]=10_000.0; S["currency"]="USD"
@@ -2509,6 +2570,8 @@ async def start(req: BotReq):
     S = get_session(req.token)
     if not S: raise HTTPException(403,"جلسة غير صالحة")
     if not S["logged_in"]: raise HTTPException(401,"سجّل الدخول أولاً")
+    if BROWSER_QX_MODE and not S.get("client"):
+        raise HTTPException(400, "Browser mode مرحلة 1: تسجيل الدخول فقط. التداول سيُفعّل في المرحلة 2.")
     if S["running"]: raise HTTPException(400,"البوت يعمل بالفعل")
     # ── إعادة تعيين كاملة لكل جلسة جديدة ──────────────────────────────────
     # أوقف أي thread قديم أولاً
@@ -2584,5 +2647,7 @@ if __name__ == "__main__":
     log.info(f"📦 pyquotex: {'✅' if QX else '❌ محاكاة'}")
     if FORCE_SIM_MODE:
         log.info("🧪 FORCE_SIM_MODE=ON (تم تعطيل اتصال Quotex الحقيقي)")
+    if BROWSER_QX_MODE:
+        log.info("🌐 BROWSER_QX_MODE=ON (تسجيل دخول Quotex عبر Playwright)")
     log.info(f"📦 pydantic : v{pydantic.VERSION}")
     uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)
