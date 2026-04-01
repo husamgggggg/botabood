@@ -1750,6 +1750,26 @@ async def _login_qx(email, password, S):
         log.error(traceback.format_exc())
         return {"ok":False,"pin":False,"msg":str(e)}
 
+
+def _should_fallback_to_sim(msg: str) -> bool:
+    m = (msg or "").lower()
+    keys = [
+        "service unavailable",
+        "not available in your region",
+        "region",
+        "cloudflare",
+        "websocket",
+        "connection rejected",
+        "connection was rejected",
+        "handshake status 403",
+        "403 forbidden",
+        "cf-mitigated",
+        "challenge",
+        "just a moment",
+        "ws2.qxbroker.com",
+    ]
+    return any(k in m for k in keys)
+
 async def _do_trade(client, asset, amount, direction, acc):
     try:
         await client.change_account("REAL" if acc=="real" else "PRACTICE")
@@ -2424,12 +2444,7 @@ async def login(req: LoginReq):
             msg = str(r.get("msg","فشل"))
             # إذا كانت الخدمة محجوبة حسب المنطقة، اسمح بالدخول على وضع المحاكاة
             # بدل إرجاع 401 يوقف استخدام الواجهة بالكامل.
-            blocked_region = any(x in msg.lower() for x in [
-                "service unavailable",
-                "not available in your region",
-                "region",
-                "cloudflare",
-            ])
+            blocked_region = _should_fallback_to_sim(msg)
             if blocked_region:
                 S["client"] = None
                 S["real_balance"] = 0.0
@@ -2438,7 +2453,7 @@ async def login(req: LoginReq):
                 S["logged_in"] = True
                 S["needs_pin"] = False
                 S["email"] = req.email
-                S["status_msg"] = "تم التحويل لوضع المحاكاة لأن Quotex غير متاح في منطقتك"
+                S["status_msg"] = "تم التحويل لوضع المحاكاة لأن اتصال Quotex مرفوض (Cloudflare/WebSocket)"
                 return {"success":True,"needs_pin":False,"email":req.email,
                         "user_id":abs(hash(req.email))%90_000_000+10_000_000,
                         "real_balance":S["real_balance"],"demo_balance":S["demo_balance"],
