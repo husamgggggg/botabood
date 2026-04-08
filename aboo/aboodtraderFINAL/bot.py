@@ -1934,7 +1934,10 @@ async def _login_qx(email, password, S):
             orig = builtins.input
             builtins.input = make_pin_input(email, S)
             try:
-                check, msg = await client.connect()
+                try:
+                    check, msg = await client.connect()
+                except Exception as e:
+                    check, msg = False, str(e)
             finally:
                 builtins.input = orig
             if check:
