@@ -42,6 +42,7 @@ class WSBridgeService:
         self._started = False
         self._cookie_header = ""
         self._cookie_ts = 0.0
+        self._has_cf_clearance = False
         self.log = logging.getLogger("WSBridge")
 
     def start(self):
@@ -74,6 +75,7 @@ class WSBridgeService:
         if async_playwright is None:
             return self._cookie_header
         nav_ok = False
+        has_cf_clearance = False
         try:
             proxy_cfg = _proxy_for_playwright(self.proxy_url)
             launch_kwargs = {"headless": True}
@@ -84,15 +86,22 @@ class WSBridgeService:
                 context_kwargs = {}
                 if proxy_cfg:
                     context_kwargs["proxy"] = proxy_cfg
+                    self.log.info("Playwright context proxy: %s", proxy_cfg.get("server", ""))
                 context = await browser.new_context(**context_kwargs)
                 page = await context.new_page()
                 if not self.skip_page_nav:
                     try:
+                        nav_timeout = max(self.nav_timeout_ms, 120000)
                         await page.goto(
                             "https://qxbroker.com/en/sign-in",
-                            wait_until="commit",
-                            timeout=self.nav_timeout_ms,
+                            wait_until="domcontentloaded",
+                            timeout=nav_timeout,
                         )
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=30000)
+                        except Exception:
+                            # networkidle قد لا يتحقق دائمًا؛ لا نعتبرها فشلًا قاطعًا.
+                            pass
                         nav_ok = True
                     except Exception as e:
                         self.log.warning("page navigation failed: %s", e)
@@ -108,14 +117,19 @@ class WSBridgeService:
                     v = c.get("value")
                     if n and v:
                         ck.append(f"{n}={v}")
+                        if n == "cf_clearance":
+                            has_cf_clearance = True
                 self._cookie_header = "; ".join(ck)
                 self._cookie_ts = time.time()
+                self._has_cf_clearance = has_cf_clearance
                 await context.close()
                 await browser.close()
         except Exception as e:
             self.log.warning("cookie refresh failed: %s", e)
         if nav_ok:
-            self.log.info("page navigation/fallback: commit")
+            self.log.info("page navigation/fallback: domcontentloaded/networkidle")
+        if not self._has_cf_clearance:
+            self.log.warning("Cloudflare clearance cookie missing (cf_clearance); proxy/session likely blocked")
         return self._cookie_header
 
     async def _handle_client(self, client_ws):
@@ -126,6 +140,8 @@ class WSBridgeService:
         upstream = None
         try:
             cookie = await self._ensure_cookie()
+            if not self._has_cf_clearance:
+                raise RuntimeError("Cloudflare challenge not solved (cf_clearance missing)")
             headers = [
                 "Origin: https://qxbroker.com",
                 "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
