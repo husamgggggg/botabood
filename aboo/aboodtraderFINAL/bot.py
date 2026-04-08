@@ -284,11 +284,8 @@ def _install_ws_redirect_patch():
                 kwargs["header"] = kwargs.get("header", [])
                 p = _proxy_parts(_resolve_proxy_url())
                 if p:
-                    kwargs["http_proxy_host"] = p.get("host")
-                    kwargs["http_proxy_port"] = p.get("port")
-                    kwargs["proxy_type"] = p.get("type")
-                    if p.get("auth"):
-                        kwargs["http_proxy_auth"] = p.get("auth")
+                    # websocket-client لا يقبل إعدادات البروكسي في __init__.
+                    # تمريرها يتم فقط عبر run_forever أدناه.
                     log.info("WS proxy patch enabled host=%s port=%s type=%s",
                              p.get("host"), p.get("port"), p.get("type"))
                 if QUOTEX_USE_PLAYWRIGHT_BRIDGE:
@@ -2978,22 +2975,14 @@ async def login(req: LoginReq):
             return {"success":False,"needs_pin":True,"message":r["msg"]}
         if not r["ok"]:
             msg = str(r.get("msg","فشل"))
-            # إذا كانت الخدمة محجوبة حسب المنطقة، اسمح بالدخول على وضع المحاكاة
-            # بدل إرجاع 401 يوقف استخدام الواجهة بالكامل.
             blocked_region = _should_fallback_to_sim(msg)
             if blocked_region:
-                S["client"] = None
-                S["real_balance"] = 0.0
-                S["demo_balance"] = 10_000.0
-                S["currency"] = "USD"
-                S["logged_in"] = True
-                S["needs_pin"] = False
-                S["email"] = req.email
-                S["status_msg"] = "تم التحويل لوضع المحاكاة لأن اتصال Quotex مرفوض (Cloudflare/WebSocket)"
-                return {"success":True,"needs_pin":False,"email":req.email,
-                        "user_id":abs(hash(req.email))%90_000_000+10_000_000,
-                        "real_balance":S["real_balance"],"demo_balance":S["demo_balance"],
-                        "currency":S["currency"],"sim_mode":True}
+                # لا تسمح بتسجيل دخول وهمي عند رفض الاتصال الحقيقي.
+                raise HTTPException(
+                    401,
+                    "تم رفض الاتصال الحقيقي من Quotex/Cloudflare. لم يتم تفعيل المحاكاة تلقائيًا. "
+                    f"التفاصيل: {msg}",
+                )
             raise HTTPException(401, msg)
         S["client"]=r.get("client")
         S["browser_state_file"] = r.get("state_file", "")
