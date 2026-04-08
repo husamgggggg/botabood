@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import socket
 import threading
 import time
 from urllib.parse import urlparse
@@ -20,11 +21,21 @@ except Exception:
 
 
 class WSBridgeService:
-    def __init__(self, listen_host: str, listen_port: int, upstream_base: str, proxy_url: str = ""):
+    def __init__(
+        self,
+        listen_host: str,
+        listen_port: int,
+        upstream_base: str,
+        proxy_url: str = "",
+        nav_timeout_ms: int = 90000,
+        skip_page_nav: bool = False,
+    ):
         self.listen_host = listen_host
         self.listen_port = listen_port
         self.upstream_base = upstream_base.rstrip("/")
         self.proxy_url = proxy_url or ""
+        self.nav_timeout_ms = int(nav_timeout_ms or 90000)
+        self.skip_page_nav = bool(skip_page_nav)
         self._server = None
         self._loop = None
         self._thread = None
@@ -42,6 +53,9 @@ class WSBridgeService:
         self._started = True
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="ws-bridge")
         self._thread.start()
+        # TCP readiness check only (avoid websocket invalid-upgrade probes).
+        if not _wait_tcp_port(self.listen_host, self.listen_port, timeout_sec=5.0):
+            self.log.error("bridge readiness check failed on %s:%s", self.listen_host, self.listen_port)
         self.log.info("Playwright WS bridge started: ws://%s:%s", self.listen_host, self.listen_port)
 
     def _run_loop(self):
@@ -72,13 +86,21 @@ class WSBridgeService:
                     context_kwargs["proxy"] = proxy_cfg
                 context = await browser.new_context(**context_kwargs)
                 page = await context.new_page()
-                try:
-                    await page.goto("https://qxbroker.com/en/sign-in", wait_until="commit", timeout=90000)
-                    nav_ok = True
-                except Exception as e:
-                    self.log.warning("page navigation failed: %s", e)
+                if not self.skip_page_nav:
+                    try:
+                        await page.goto(
+                            "https://qxbroker.com/en/sign-in",
+                            wait_until="commit",
+                            timeout=self.nav_timeout_ms,
+                        )
+                        nav_ok = True
+                    except Exception as e:
+                        self.log.warning("page navigation failed: %s", e)
+                        await page.goto("about:blank", wait_until="commit", timeout=30000)
+                        self.log.info("page navigation/fallback: about:blank")
+                else:
                     await page.goto("about:blank", wait_until="commit", timeout=30000)
-                    self.log.info("page navigation/fallback: about:blank")
+                    self.log.info("page navigation/fallback: skip-page-nav=1 -> about:blank")
                 cookies = await context.cookies(["https://qxbroker.com", "https://ws2.qxbroker.com"])
                 ck = []
                 for c in cookies:
@@ -122,7 +144,7 @@ class WSBridgeService:
                 proxy_type=p.get("type"),
                 http_proxy_auth=p.get("auth"),
             )
-            self.log.info("OPEN upstream=%s", upstream_url)
+            self.log.info("upstream Quotex WebSocket OPEN %s", upstream_url)
 
             async def c2u():
                 async for message in client_ws:
@@ -157,7 +179,7 @@ class WSBridgeService:
                 await client_ws.close()
             except Exception:
                 pass
-            self.log.info("CLOSE")
+            self.log.info("upstream Quotex WebSocket CLOSE")
 
 
 def _parse_proxy(proxy_url: str) -> dict:
@@ -194,3 +216,14 @@ def _proxy_for_playwright(proxy_url: str):
         return cfg
     except Exception:
         return None
+
+
+def _wait_tcp_port(host: str, port: int, timeout_sec: float = 5.0) -> bool:
+    end = time.time() + timeout_sec
+    while time.time() < end:
+        try:
+            with socket.create_connection((host, int(port)), timeout=0.8):
+                return True
+        except Exception:
+            time.sleep(0.2)
+    return False

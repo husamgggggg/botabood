@@ -10,6 +10,7 @@ abood trader Bot — النسخة النهائية الكاملة
 """
 import asyncio, json, logging, os, queue, random, re
 import secrets, threading, time, traceback
+import socket
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -40,8 +41,11 @@ if FORCE_SIM_MODE:
 BROWSER_QX_MODE = os.getenv("BROWSER_QX_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
 QUOTEX_USE_PLAYWRIGHT_BRIDGE = os.getenv("QUOTEX_USE_PLAYWRIGHT_BRIDGE", "0").strip().lower() in ("1", "true", "yes", "on")
 QUOTEX_PROXY_URL = os.getenv("QUOTEX_PROXY_URL", "").strip()
+QUOTEX_WS_BRIDGE_PROXY = os.getenv("QUOTEX_WS_BRIDGE_PROXY", "").strip()
 QUOTEX_WS_BRIDGE_PORT = int(os.getenv("QUOTEX_WS_BRIDGE_PORT", "18765"))
 QUOTEX_WS_UPSTREAM = os.getenv("QUOTEX_WS_UPSTREAM", "wss://ws2.qxbroker.com")
+QUOTEX_BRIDGE_NAV_TIMEOUT_MS = int(os.getenv("QUOTEX_BRIDGE_NAV_TIMEOUT_MS", "90000"))
+QUOTEX_BRIDGE_SKIP_PAGE_NAV = os.getenv("QUOTEX_BRIDGE_SKIP_PAGE_NAV", "0").strip().lower() in ("1", "true", "yes", "on")
 
 # تشخيص آخر جلب شموع / WebSocket (للوج)
 _HUSAAM_WS_LAST: dict = {}
@@ -65,6 +69,42 @@ def _ws_history_asset_matches(api, msg_asset, current_asset) -> bool:
     return str(msg_asset) == str(current_asset)
 
 
+def _extract_socketio_payload(msg):
+    """
+    يدعم صيغ engine.io/socket.io المختلفة:
+    - bytes / text
+    - prefixes مثل 4 / 42 / 451-["..."]
+    """
+    try:
+        if isinstance(msg, (bytes, bytearray)):
+            raw = msg.decode("utf-8", errors="ignore")
+        else:
+            raw = str(msg or "")
+        if not raw:
+            return None
+        s = raw.strip()
+        # Skip leading engine/socket digits.
+        while s and s[0].isdigit():
+            s = s[1:]
+        # remove optional namespace id like "51-"
+        s = re.sub(r"^\d+-", "", s)
+        s = s.strip()
+        if not s:
+            return None
+        if s.startswith("{"):
+            obj = json.loads(s)
+            return obj if isinstance(obj, dict) else None
+        if s.startswith("["):
+            arr = json.loads(s)
+            if isinstance(arr, list):
+                for item in reversed(arr):
+                    if isinstance(item, dict):
+                        return item
+        return None
+    except Exception:
+        return None
+
+
 def _install_pyquotex_ws_candle_asset_fix():
     """يصل رد history/list/v2 لكن pyquotex لا يخزّن candles_data إذا اختلف نوع مفتاح asset."""
     if not QX:
@@ -79,16 +119,10 @@ def _install_pyquotex_ws_candle_asset_fix():
 
     def _on_message(self, wss, msg):
         _orig(self, wss, msg)
-        try:
-            if not isinstance(msg, (bytes, bytearray)) or len(msg) < 2:
-                return
-            raw = msg[1:].decode("utf-8", errors="ignore")
-            if "history" not in raw and "candles" not in raw:
-                return
-            message = json.loads(raw)
-        except Exception:
+        message = _extract_socketio_payload(msg)
+        if not isinstance(message, dict):
             return
-        if not isinstance(message, dict) or "history" not in message:
+        if "history" not in message and "candles" not in message:
             return
         ma = message.get("asset")
         ca = getattr(self.api, "current_asset", None)
@@ -183,6 +217,26 @@ def _proxy_parts(proxy_url: str) -> dict:
         return {}
 
 
+def _resolve_proxy_url() -> str:
+    return (
+        QUOTEX_WS_BRIDGE_PROXY
+        or QUOTEX_PROXY_URL
+        or os.getenv("HTTPS_PROXY", "").strip()
+        or os.getenv("HTTP_PROXY", "").strip()
+    )
+
+
+def _wait_tcp_ready(host: str, port: int, timeout_sec: float = 5.0) -> bool:
+    end = time.time() + timeout_sec
+    while time.time() < end:
+        try:
+            with socket.create_connection((host, int(port)), timeout=0.8):
+                return True
+        except Exception:
+            time.sleep(0.2)
+    return False
+
+
 def _start_ws_bridge_if_needed():
     global _WS_BRIDGE
     if not (QX and QUOTEX_USE_PLAYWRIGHT_BRIDGE):
@@ -197,9 +251,13 @@ def _start_ws_bridge_if_needed():
             listen_host="127.0.0.1",
             listen_port=QUOTEX_WS_BRIDGE_PORT,
             upstream_base=QUOTEX_WS_UPSTREAM,
-            proxy_url=QUOTEX_PROXY_URL,
+            proxy_url=_resolve_proxy_url(),
+            nav_timeout_ms=QUOTEX_BRIDGE_NAV_TIMEOUT_MS,
+            skip_page_nav=QUOTEX_BRIDGE_SKIP_PAGE_NAV,
         )
         _WS_BRIDGE.start()
+        if not _wait_tcp_ready("127.0.0.1", QUOTEX_WS_BRIDGE_PORT, timeout_sec=6):
+            log.error("WS bridge port is not ready on 127.0.0.1:%s", QUOTEX_WS_BRIDGE_PORT)
         log.info("WS proxy patch enabled (bridge port=%s, upstream=%s)", QUOTEX_WS_BRIDGE_PORT, QUOTEX_WS_UPSTREAM)
 
 
@@ -224,7 +282,7 @@ def _install_ws_redirect_patch():
                 if u.query:
                     path_q += f"?{u.query}"
                 kwargs["header"] = kwargs.get("header", [])
-                p = _proxy_parts(QUOTEX_PROXY_URL)
+                p = _proxy_parts(_resolve_proxy_url())
                 if p:
                     kwargs["http_proxy_host"] = p.get("host")
                     kwargs["http_proxy_port"] = p.get("port")
@@ -243,6 +301,26 @@ def _install_ws_redirect_patch():
 
     _patched_init._abood_bridge_patch = True
     websocket.WebSocketApp.__init__ = _patched_init
+
+    _orig_run_forever = websocket.WebSocketApp.run_forever
+
+    def _patched_run_forever(self, *args, **kwargs):
+        try:
+            target = str(getattr(self, "url", "") or "")
+            if "ws2.qxbroker.com" in target:
+                p = _proxy_parts(_resolve_proxy_url())
+                if p:
+                    kwargs.setdefault("http_proxy_host", p.get("host"))
+                    kwargs.setdefault("http_proxy_port", p.get("port"))
+                    kwargs.setdefault("proxy_type", p.get("type"))
+                    if p.get("auth"):
+                        kwargs.setdefault("http_proxy_auth", p.get("auth"))
+        except Exception as e:
+            log.warning("run_forever proxy patch failed: %s", e)
+        return _orig_run_forever(self, *args, **kwargs)
+
+    _patched_run_forever._abood_bridge_patch = True
+    websocket.WebSocketApp.run_forever = _patched_run_forever
 
 
 _start_ws_bridge_if_needed()
@@ -3054,8 +3132,10 @@ if __name__ == "__main__":
     if BROWSER_QX_MODE:
         log.info("🌐 BROWSER_QX_MODE=ON (تداول Quotex عبر Playwright - مرحلة 2)")
     if QUOTEX_USE_PLAYWRIGHT_BRIDGE:
-        log.info("🌉 QUOTEX_USE_PLAYWRIGHT_BRIDGE=ON | port=%s | proxy=%s",
+        log.info("🌉 QUOTEX_USE_PLAYWRIGHT_BRIDGE=ON | port=%s | proxy=%s | nav_timeout_ms=%s | skip_nav=%s",
                  QUOTEX_WS_BRIDGE_PORT,
-                 "set" if QUOTEX_PROXY_URL else "none")
+                 "set" if _resolve_proxy_url() else "none",
+                 QUOTEX_BRIDGE_NAV_TIMEOUT_MS,
+                 int(QUOTEX_BRIDGE_SKIP_PAGE_NAV))
     log.info(f"📦 pydantic : v{pydantic.VERSION}")
     uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)
