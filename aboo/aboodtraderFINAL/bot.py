@@ -11,6 +11,7 @@ abood trader Bot — النسخة النهائية الكاملة
 import asyncio, json, logging, os, queue, random, re
 import secrets, threading, time, traceback
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import pydantic, uvicorn
 from fastapi import FastAPI, HTTPException
@@ -37,10 +38,15 @@ FORCE_SIM_MODE = os.getenv("FORCE_SIM_MODE", "0").strip().lower() in ("1", "true
 if FORCE_SIM_MODE:
     QX = False
 BROWSER_QX_MODE = os.getenv("BROWSER_QX_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
+QUOTEX_USE_PLAYWRIGHT_BRIDGE = os.getenv("QUOTEX_USE_PLAYWRIGHT_BRIDGE", "0").strip().lower() in ("1", "true", "yes", "on")
+QUOTEX_PROXY_URL = os.getenv("QUOTEX_PROXY_URL", "").strip()
+QUOTEX_WS_BRIDGE_PORT = int(os.getenv("QUOTEX_WS_BRIDGE_PORT", "18765"))
+QUOTEX_WS_UPSTREAM = os.getenv("QUOTEX_WS_UPSTREAM", "wss://ws2.qxbroker.com")
 
 # تشخيص آخر جلب شموع / WebSocket (للوج)
 _HUSAAM_WS_LAST: dict = {}
 _BROWSER_TICKETS: dict = {}
+_WS_BRIDGE = None
 
 
 def _ws_history_asset_matches(api, msg_asset, current_asset) -> bool:
@@ -142,6 +148,13 @@ logging.basicConfig(
 )
 log = logging.getLogger("AboodTrader")
 
+_ws_log = logging.getLogger("WSBridge")
+_ws_log.setLevel(logging.INFO)
+if not any(isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "").endswith("ws_bridge.log") for h in _ws_log.handlers):
+    _h = logging.FileHandler("logs/ws_bridge.log", encoding="utf-8")
+    _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    _ws_log.addHandler(_h)
+
 
 def _configure_quiet_loggers():
     """يخفي سجل وصول Uvicorn وضجيج websocket (Sending ping) عند أي طريقة تشغيل."""
@@ -150,6 +163,90 @@ def _configure_quiet_loggers():
 
 
 _configure_quiet_loggers()
+
+
+def _proxy_parts(proxy_url: str) -> dict:
+    if not proxy_url:
+        return {}
+    try:
+        u = urlparse(proxy_url)
+        if not u.hostname or not u.port:
+            return {}
+        ptype = "http"
+        if (u.scheme or "").lower().startswith("socks5"):
+            ptype = "socks5"
+        auth = None
+        if u.username and u.password:
+            auth = (u.username, u.password)
+        return {"host": u.hostname, "port": int(u.port), "type": ptype, "auth": auth}
+    except Exception:
+        return {}
+
+
+def _start_ws_bridge_if_needed():
+    global _WS_BRIDGE
+    if not (QX and QUOTEX_USE_PLAYWRIGHT_BRIDGE):
+        return
+    try:
+        from ws_bridge import WSBridgeService
+    except Exception as e:
+        log.error("WS bridge import failed: %s", e)
+        return
+    if _WS_BRIDGE is None:
+        _WS_BRIDGE = WSBridgeService(
+            listen_host="127.0.0.1",
+            listen_port=QUOTEX_WS_BRIDGE_PORT,
+            upstream_base=QUOTEX_WS_UPSTREAM,
+            proxy_url=QUOTEX_PROXY_URL,
+        )
+        _WS_BRIDGE.start()
+        log.info("WS proxy patch enabled (bridge port=%s, upstream=%s)", QUOTEX_WS_BRIDGE_PORT, QUOTEX_WS_UPSTREAM)
+
+
+def _install_ws_redirect_patch():
+    if not (QX and (QUOTEX_USE_PLAYWRIGHT_BRIDGE or QUOTEX_PROXY_URL)):
+        return
+    try:
+        import websocket
+    except Exception as e:
+        log.error("websocket-client import failed for bridge patch: %s", e)
+        return
+    if getattr(websocket.WebSocketApp.__init__, "_abood_bridge_patch", False):
+        return
+    _orig_init = websocket.WebSocketApp.__init__
+
+    def _patched_init(self, url, *args, **kwargs):
+        try:
+            target = str(url or "")
+            if "ws2.qxbroker.com" in target:
+                u = urlparse(target)
+                path_q = u.path or "/"
+                if u.query:
+                    path_q += f"?{u.query}"
+                kwargs["header"] = kwargs.get("header", [])
+                p = _proxy_parts(QUOTEX_PROXY_URL)
+                if p:
+                    kwargs["http_proxy_host"] = p.get("host")
+                    kwargs["http_proxy_port"] = p.get("port")
+                    kwargs["proxy_type"] = p.get("type")
+                    if p.get("auth"):
+                        kwargs["http_proxy_auth"] = p.get("auth")
+                    log.info("WS proxy patch enabled host=%s port=%s type=%s",
+                             p.get("host"), p.get("port"), p.get("type"))
+                if QUOTEX_USE_PLAYWRIGHT_BRIDGE:
+                    new_url = f"ws://127.0.0.1:{QUOTEX_WS_BRIDGE_PORT}{path_q}"
+                    log.info("WebSocket redirected via Playwright bridge: %s -> %s", target, new_url)
+                    url = new_url
+        except Exception as e:
+            log.warning("WS redirect patch failed, fallback direct WS: %s", e)
+        return _orig_init(self, url, *args, **kwargs)
+
+    _patched_init._abood_bridge_patch = True
+    websocket.WebSocketApp.__init__ = _patched_init
+
+
+_start_ws_bridge_if_needed()
+_install_ws_redirect_patch()
 
 USERS_F  = "data/users.json"
 ADMIN_PW = "Admin@2024"
@@ -2956,5 +3053,9 @@ if __name__ == "__main__":
         log.info("🧪 FORCE_SIM_MODE=ON (تم تعطيل اتصال Quotex الحقيقي)")
     if BROWSER_QX_MODE:
         log.info("🌐 BROWSER_QX_MODE=ON (تداول Quotex عبر Playwright - مرحلة 2)")
+    if QUOTEX_USE_PLAYWRIGHT_BRIDGE:
+        log.info("🌉 QUOTEX_USE_PLAYWRIGHT_BRIDGE=ON | port=%s | proxy=%s",
+                 QUOTEX_WS_BRIDGE_PORT,
+                 "set" if QUOTEX_PROXY_URL else "none")
     log.info(f"📦 pydantic : v{pydantic.VERSION}")
     uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)
