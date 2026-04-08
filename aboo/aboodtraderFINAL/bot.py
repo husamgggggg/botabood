@@ -1926,11 +1926,26 @@ async def _login_qx(email, password, S):
     try:
         client = Quotex(email=email, password=password, lang="en")
         S["client"] = client
-        import builtins
-        orig = builtins.input
-        builtins.input = make_pin_input(email, S)
-        try: check, msg = await client.connect()
-        finally: builtins.input = orig
+        check, msg = False, "فشل الاتصال"
+        # بعض جلسات WS عبر Cloudflare/bridge تُغلق مباشرة بعد connect (code=1000).
+        # نعيد المحاولة سريعًا قبل إعلان الفشل النهائي.
+        for attempt in range(1, 4):
+            import builtins
+            orig = builtins.input
+            builtins.input = make_pin_input(email, S)
+            try:
+                check, msg = await client.connect()
+            finally:
+                builtins.input = orig
+            if check:
+                break
+            m = str(msg or "")
+            is_closed_race = ("already closed" in m.lower()) or ("connection is already closed" in m.lower())
+            if attempt < 3 and is_closed_race:
+                log.warning("WS closed during login attempt %s/3; retrying...", attempt)
+                await asyncio.sleep(1.0)
+                continue
+            break
         if not check:
             if S["needs_pin"]:
                 return {"ok":False,"pin":True,"msg":"أدخل PIN من بريدك"}
